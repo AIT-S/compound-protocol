@@ -65,6 +65,9 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
     /// @notice Emitted when supply cap guardian is changed
     event NewSupplyCapGuardian(address oldSupplyCapGuardian, address newSupplyCapGuardian);
 
+    /// @notice Emitted when protocol's credit limit has changed
+    event CreditLimitChanged(address protocol, address market, uint creditLimit);
+
     /// @notice The threshold above which the flywheel transfers COMP, in wei
     uint public constant compClaimThreshold = 0.001e18;
 
@@ -750,18 +753,37 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
             // sumCollateral += tokensToDenom * cTokenBalance
             vars.sumCollateral = mul_ScalarTruncateAddUInt(vars.tokensToDenom, vars.cTokenBalance, vars.sumCollateral);
 
-            // sumBorrowPlusEffects += oraclePrice * borrowBalance
-            vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.oraclePrice, vars.borrowBalance, vars.sumBorrowPlusEffects);
+            // borrowValue = oraclePrice * borrowBalance
+            uint creditLimit = creditLimits[account][address(asset)];
+            uint borrowValue = mul_ScalarTruncate(vars.oraclePrice, vars.borrowBalance);
+            if (creditLimit > borrowValue) {
+                creditLimit = creditLimit - borrowValue;
+                borrowValue = 0;
+            } else {
+                borrowValue = borrowValue - creditLimit;
+                creditLimit = 0;
+            }
+
+            // sumBorrowPlusEffects += borrowValue
+            vars.sumBorrowPlusEffects = add_(borrowValue, vars.sumBorrowPlusEffects);
 
             // Calculate effects of interacting with cTokenModify
             if (asset == cTokenModify) {
                 // redeem effect
-                // sumBorrowPlusEffects += tokensToDenom * redeemTokens
-                vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.tokensToDenom, redeemTokens, vars.sumBorrowPlusEffects);
+                // redeemEffect = tokensToDenom * redeemTokens
+                // sumBorrowPlusEffects += (redeemEffect - creditLimit)
+                uint redeemEffect = mul_ScalarTruncate(vars.tokensToDenom, redeemTokens);
+                if (creditLimit < redeemEffect) {
+                    vars.sumBorrowPlusEffects = add_(redeemEffect - creditLimit, vars.sumBorrowPlusEffects);
+                }
 
                 // borrow effect
-                // sumBorrowPlusEffects += oraclePrice * borrowAmount
-                vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.oraclePrice, borrowAmount, vars.sumBorrowPlusEffects);
+                // borrowEffect = oraclePrice * borrowAmount
+                // sumBorrowPlusEffects += (borrowEffect - creditLimit)
+                uint borrowEffect = mul_ScalarTruncate(vars.oraclePrice, borrowAmount);
+                if (creditLimit < borrowEffect) {
+                    vars.sumBorrowPlusEffects = add_(borrowEffect - creditLimit, vars.sumBorrowPlusEffects);
+                }
             }
         }
 
@@ -1085,6 +1107,20 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
     function _become(Unitroller unitroller) public {
         require(msg.sender == unitroller.admin(), "only unitroller admin can change brains");
         require(unitroller._acceptImplementation() == 0, "change not authorized");
+    }
+
+    /**
+      * @notice Sets protocol's credit limit by market
+      * @param protocol The address of the protocol
+      * @param market The market
+      * @param creditLimit The credit limit
+      */
+    function _setCreditLimit(address protocol, address market, uint creditLimit) public {
+        require(msg.sender == admin, "only admin can set protocol credit limit");
+        require(markets[market].isListed, "invalid market");
+
+        creditLimits[protocol][market] = creditLimit;
+        emit CreditLimitChanged(protocol, market, creditLimit);
     }
 
     /**
